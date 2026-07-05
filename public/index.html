@@ -12,6 +12,24 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <div id="loginGate" class="login-gate" aria-hidden="false">
+      <form id="loginForm" class="login-panel">
+        <p class="eyebrow">Admin Login</p>
+        <h2>登录后生成订阅</h2>
+        <label for="loginPassword">登录密码</label>
+        <input
+          id="loginPassword"
+          name="loginPassword"
+          type="password"
+          autocomplete="current-password"
+          placeholder="请输入密码"
+          required
+        />
+        <p id="loginMessage" class="hint"></p>
+        <button id="loginBtn" type="submit">登录</button>
+      </form>
+    </div>
+
     <main class="container">
       <section class="hero card">
         <div>
@@ -28,6 +46,7 @@
         <div class="hero-note">
           <strong>适合场景</strong>
           <p>3X-UI / Xray / VPS 自建节点 + 你自己找好的 Cloudflare 优选 IP。</p>
+          <button id="logoutBtn" type="button" class="secondary small">退出登录</button>
         </div>
       </section>
 
@@ -64,7 +83,18 @@ cf.example.com:443#US-Edge"
 
           <div class="grid two-col compact">
             <div>
-              <label for="namePrefix">3. 备注前缀（可选）</label>
+              <label for="clientName">3. 客户端导入名称</label>
+              <input id="clientName" name="clientName" type="text" value="CloudflareSub" placeholder="例如 我的优选订阅" />
+            </div>
+            <div>
+              <label for="tokenTtlDays">4. Token 过期时间（天）</label>
+              <input id="tokenTtlDays" name="tokenTtlDays" type="number" min="0.01" step="0.01" value="7" />
+            </div>
+          </div>
+
+          <div class="grid two-col compact">
+            <div>
+              <label for="namePrefix">5. 节点备注前缀（可选）</label>
               <input id="namePrefix" name="namePrefix" type="text" placeholder="例如 CF" />
             </div>
             <div class="checkbox-wrap">
@@ -82,10 +112,12 @@ cf.example.com:443#US-Edge"
         <aside class="card stack-md tips">
           <h2>说明</h2>
           <ul>
-            <li>不会帮你找优选 IP，只负责把你现成的优选 IP 替换进节点。</li>
+            <li>优选 IP 已预填默认列表，你可以直接删除、追加或替换。</li>
+            <li>Token 过期时间会写入 KV 的有效期，到期后订阅短链接自动失效。</li>
+            <li>客户端导入名称会用于订阅标题和生成节点名称。</li>
             <li>生成的链接是“同一份节点内容”的不同导出格式，分别给不同客户端使用。</li>
             <li>推荐勾选“保留原 Host / SNI”，这样更适合 Cloudflare CDN 场景。</li>
-            <li>订阅链接里的节点信息会通过服务端密钥加密，请不要把链接公开分享。</li>
+            <li>管理页面需要登录，默认密码为 admin。</li>
           </ul>
 
           <div class="client-box">
@@ -127,6 +159,10 @@ cf.example.com:443#US-Edge"
           <div class="stat-card">
             <span class="stat-label">生成节点</span>
             <strong id="statOutputNodes">0</strong>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">链接过期</span>
+            <strong id="statExpiresAt">-</strong>
           </div>
         </div>
 

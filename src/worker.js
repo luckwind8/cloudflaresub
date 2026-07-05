@@ -5,24 +5,32 @@
 // Optional:
 // - Secret/Variable: SUB_LINK_SECRET (legacy long-token compatibility)
 
-function json(data, status = 200) {
+const DEFAULT_ADMIN_PASSWORD = 'admin';
+const AUTH_COOKIE_NAME = 'cloudflaresub_admin';
+const AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 30;
+const DEFAULT_TOKEN_TTL_DAYS = 7;
+const MAX_TOKEN_TTL_DAYS = 3650;
+
+function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
       'access-control-allow-origin': '*',
       'access-control-allow-methods': 'GET,POST,OPTIONS',
-      'access-control-allow-headers': 'content-type',
+      'access-control-allow-headers': 'content-type,x-admin-password',
+      ...extraHeaders,
     },
   });
 }
 
-function text(body, status = 200, contentType = 'text/plain; charset=utf-8') {
+function text(body, status = 200, contentType = 'text/plain; charset=utf-8', extraHeaders = {}) {
   return new Response(body, {
     status,
     headers: {
       'content-type': contentType,
       'access-control-allow-origin': '*',
+      ...extraHeaders,
     },
   });
 }
@@ -42,6 +50,126 @@ function escapeYaml(str = '') {
     .replace(/\n/g, ' ');
 }
 
+function sanitizeHeaderValue(value = '') {
+  return String(value).replace(/[\r\n]/g, ' ').trim();
+}
+
+function sanitizeFilename(value = 'subscription') {
+  const clean = sanitizeHeaderValue(value)
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return clean || 'subscription';
+}
+
+function getAdminPassword(env) {
+  return String(env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD);
+}
+
+function getCookie(request, name) {
+  const cookieHeader = request.headers.get('cookie') || '';
+  const cookies = cookieHeader.split(';').map((item) => item.trim());
+  const prefix = `${name}=`;
+  const found = cookies.find((item) => item.startsWith(prefix));
+  return found ? decodeURIComponent(found.slice(prefix.length)) : '';
+}
+
+function safeEqual(left = '', right = '') {
+  const a = String(left);
+  const b = String(right);
+  if (a.length !== b.length) return false;
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
+
+async function isLoggedIn(request, env) {
+  const passwordHeader = request.headers.get('x-admin-password') || '';
+  if (passwordHeader && safeEqual(passwordHeader, getAdminPassword(env))) {
+    return true;
+  }
+
+  const sessionId = getCookie(request, AUTH_COOKIE_NAME);
+  if (!sessionId || !env.SUB_STORE) return false;
+  const sessionHash = await sha256Hex(sessionId);
+  const stored = await env.SUB_STORE.get(`session:${sessionHash}`);
+  return Boolean(stored);
+}
+
+async function buildAuthCookie(env, url) {
+  if (!env.SUB_STORE) {
+    throw new Error('未配置 SUB_STORE，无法创建登录会话');
+  }
+  const value = createShortId(32);
+  const sessionHash = await sha256Hex(value);
+  await env.SUB_STORE.put(`session:${sessionHash}`, '1', {
+    expirationTtl: AUTH_COOKIE_MAX_AGE,
+  });
+  const secure = url.protocol === 'https:' ? '; Secure' : '';
+  return `${AUTH_COOKIE_NAME}=${encodeURIComponent(value)}; Path=/; Max-Age=${AUTH_COOKIE_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`;
+}
+
+function buildExpiredAuthCookie() {
+  return `${AUTH_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`;
+}
+
+async function deleteAuthSession(request, env) {
+  const sessionId = getCookie(request, AUTH_COOKIE_NAME);
+  if (!sessionId || !env.SUB_STORE?.delete) return;
+  const sessionHash = await sha256Hex(sessionId);
+  await env.SUB_STORE.delete(`session:${sessionHash}`);
+}
+
+async function handleLogin(request, env, url) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, error: '请求体不是合法 JSON' }, 400);
+  }
+
+  const password = String(body.password || '');
+  if (!safeEqual(password, getAdminPassword(env))) {
+    return json({ ok: false, error: '登录密码错误' }, 401);
+  }
+
+  return json(
+    { ok: true },
+    200,
+    {
+      'set-cookie': await buildAuthCookie(env, url),
+    },
+  );
+}
+
+function parseTokenTtlDays(value) {
+  const raw = String(value ?? '').trim();
+  const days = raw ? Number(raw) : DEFAULT_TOKEN_TTL_DAYS;
+  if (!Number.isFinite(days) || days <= 0) {
+    throw new Error('Token 过期时间必须是大于 0 的天数');
+  }
+  if (days > MAX_TOKEN_TTL_DAYS) {
+    throw new Error(`Token 过期时间不能超过 ${MAX_TOKEN_TTL_DAYS} 天`);
+  }
+  return days;
+}
+
+function tokenTtlSecondsFromDays(days) {
+  return Math.max(60, Math.round(days * 24 * 60 * 60));
+}
+
+function buildSubscriptionHeaders(record, extension = 'txt') {
+  const clientName = sanitizeHeaderValue(record?.options?.clientName || '');
+  if (!clientName) return {};
+  const filename = `${sanitizeFilename(clientName)}.${extension}`;
+  return {
+    'profile-title': `base64:${b64EncodeUtf8(clientName)}`,
+    'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+  };
+}
+
 function parsePreferredEndpoints(input) {
   return String(input || '')
     .split(/\r?\n/)
@@ -51,13 +179,37 @@ function parsePreferredEndpoints(input) {
       const [raw, remark = ''] = line.split('#');
       const value = raw.trim();
       const hashRemark = remark.trim();
-      const match = value.match(/^(.*?)(?::(\d+))?$/);
+      const { server, port } = splitEndpointHostAndPort(value);
       return {
-        server: match?.[1] || value,
-        port: match?.[2] ? Number(match[2]) : undefined,
+        server,
+        port,
         remark: hashRemark,
       };
     });
+}
+
+function splitEndpointHostAndPort(value) {
+  const input = String(value || '').trim();
+  if (!input) return { server: '', port: undefined };
+
+  if (input.startsWith('[')) {
+    const match = input.match(/^\[([^\]]+)](?::(\d+))?$/);
+    if (!match) return { server: input, port: undefined };
+    return {
+      server: match[1],
+      port: match[2] ? Number(match[2]) : undefined,
+    };
+  }
+
+  const colonCount = (input.match(/:/g) || []).length;
+  if (colonCount === 1) {
+    const [server, portText] = input.split(':');
+    if (/^\d+$/.test(portText)) {
+      return { server, port: Number(portText) };
+    }
+  }
+
+  return { server: input, port: undefined };
 }
 
 function parseVmess(link) {
@@ -133,12 +285,13 @@ function parseRawLinks(input) {
 function buildNodes(baseNodes, preferredEndpoints, options = {}) {
   const output = [];
   const prefix = (options.namePrefix || '').trim();
+  const clientName = (options.clientName || '').trim();
   let counter = 0;
   for (const node of baseNodes) {
     for (const ep of preferredEndpoints) {
       counter += 1;
       const nameParts = [];
-      if (node.name) nameParts.push(node.name);
+      nameParts.push(clientName || node.name || 'node');
       if (prefix) nameParts.push(prefix);
       if (ep.remark) nameParts.push(ep.remark);
       else nameParts.push(String(counter));
@@ -342,12 +495,14 @@ async function sha256Hex(input) {
     .join('');
 }
 
-async function buildDedupHash(body) {
+async function buildDedupHash(body, normalizedOptions = {}) {
   const normalized = {
     nodeLinks: normalizeLines(body.nodeLinks || ''),
     preferredIps: normalizeLines(body.preferredIps || ''),
     namePrefix: String(body.namePrefix || '').trim(),
+    clientName: String(normalizedOptions.clientName || '').trim(),
     keepOriginalHost: body.keepOriginalHost !== false,
+    tokenTtlSeconds: normalizedOptions.tokenTtlSeconds,
   };
   return sha256Hex(JSON.stringify(normalized));
 }
@@ -366,9 +521,21 @@ async function handleGenerate(request, env, url) {
   if (!baseNodes.length) return json({ ok: false, error: '没有识别到可用节点' }, 400);
   if (!preferredEndpoints.length) return json({ ok: false, error: '没有识别到可用优选地址' }, 400);
 
+  let tokenTtlDays;
+  try {
+    tokenTtlDays = parseTokenTtlDays(body.tokenTtlDays);
+  } catch (error) {
+    return json({ ok: false, error: error.message }, 400);
+  }
+  const tokenTtlSeconds = tokenTtlSecondsFromDays(tokenTtlDays);
+  const clientName = sanitizeHeaderValue(body.clientName || '');
+
   const options = {
     namePrefix: body.namePrefix || '',
+    clientName,
     keepOriginalHost: body.keepOriginalHost !== false,
+    tokenTtlDays,
+    tokenTtlSeconds,
   };
 
   const nodes = buildNodes(baseNodes, preferredEndpoints, options);
@@ -380,23 +547,23 @@ async function handleGenerate(request, env, url) {
     nodes,
   };
 
-  const dedupHash = await buildDedupHash(body);
+  const dedupHash = await buildDedupHash(body, options);
   const dedupKey = `dedup:${dedupHash}`;
 
   let id = await env.SUB_STORE.get(dedupKey);
+  const deduplicated = Boolean(id);
 
   if (!id) {
     id = await createUniqueShortId(env);
-    const ttl = 60 * 60 * 24 * 7; // 7天
-
-    await env.SUB_STORE.put(`sub:${id}`, JSON.stringify(payload), {
-      expirationTtl: ttl,
-    });
-
-    await env.SUB_STORE.put(dedupKey, id, {
-      expirationTtl: ttl,
-    });
   }
+
+  await env.SUB_STORE.put(`sub:${id}`, JSON.stringify(payload), {
+    expirationTtl: tokenTtlSeconds,
+  });
+
+  await env.SUB_STORE.put(dedupKey, id, {
+    expirationTtl: tokenTtlSeconds,
+  });
 
   const origin = url.origin;
   const accessToken = env.SUB_ACCESS_TOKEN || '';
@@ -410,8 +577,12 @@ async function handleGenerate(request, env, url) {
   return json({
     ok: true,
     storage: 'kv',
-    deduplicated: true,
+    deduplicated,
     shortId: id,
+    clientName,
+    tokenTtlDays,
+    tokenTtlSeconds,
+    expiresAt: new Date(Date.now() + tokenTtlSeconds * 1000).toISOString(),
     urls: {
       auto: withToken(''),
       raw: withToken('raw'),
@@ -460,16 +631,27 @@ async function handleSub(url, env) {
   const target = (url.searchParams.get('target') || 'raw').toLowerCase();
 
   if (target === 'clash') {
-    return text(renderClash(nodes), 200, 'text/yaml; charset=utf-8');
+    return text(
+      renderClash(nodes),
+      200,
+      'text/yaml; charset=utf-8',
+      buildSubscriptionHeaders(record, 'yaml'),
+    );
   }
   if (target === 'surge') {
     return text(
       renderSurge(nodes, url.origin + url.pathname, env.SUB_ACCESS_TOKEN || ''),
       200,
       'text/plain; charset=utf-8',
+      buildSubscriptionHeaders(record, 'conf'),
     );
   }
-  return text(renderRaw(nodes), 200, 'text/plain; charset=utf-8');
+  return text(
+    renderRaw(nodes),
+    200,
+    'text/plain; charset=utf-8',
+    buildSubscriptionHeaders(record, 'txt'),
+  );
 }
 
 export default {
@@ -481,12 +663,34 @@ export default {
         headers: {
           'access-control-allow-origin': '*',
           'access-control-allow-methods': 'GET,POST,OPTIONS',
-          'access-control-allow-headers': 'content-type',
+          'access-control-allow-headers': 'content-type,x-admin-password',
         },
       });
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/login') {
+      return handleLogin(request, env, url);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/logout') {
+      await deleteAuthSession(request, env);
+      return json(
+        { ok: true },
+        200,
+        {
+          'set-cookie': buildExpiredAuthCookie(),
+        },
+      );
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/session') {
+      return json({ ok: true, authenticated: await isLoggedIn(request, env) });
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/generate') {
+      if (!(await isLoggedIn(request, env))) {
+        return json({ ok: false, error: '请先登录' }, 401);
+      }
       return handleGenerate(request, env, url);
     }
 
