@@ -91,6 +91,20 @@ const blocked = await worker.fetch(
 );
 assert.equal(blocked.status, 401);
 
+const missingKvLogin = await worker.fetch(
+  new Request('https://example.com/api/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ password: 'admin' }),
+  }),
+  { ASSETS: env.ASSETS },
+);
+assert.equal(missingKvLogin.status, 500);
+assert.match(missingKvLogin.headers.get('content-type'), /application\/json/);
+const missingKvJson = await missingKvLogin.json();
+assert.equal(missingKvJson.ok, false);
+assert.match(missingKvJson.error, /SUB_STORE/);
+
 const login = await worker.fetch(
   new Request('https://example.com/api/login', {
     method: 'POST',

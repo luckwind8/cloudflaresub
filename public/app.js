@@ -92,7 +92,7 @@ loginForm.addEventListener('submit', async (event) => {
       }),
     });
 
-    const data = await response.json();
+    const data = await readApiJson(response);
     if (!response.ok || !data.ok) {
       throw new Error(data.error || '登录失败');
     }
@@ -149,7 +149,7 @@ form.addEventListener('submit', async (event) => {
       body: JSON.stringify(payload),
     });
 
-    const data = await response.json();
+    const data = await readApiJson(response);
     if (!response.ok || !data.ok) {
       throw new Error(data.error || '生成失败');
     }
@@ -267,7 +267,7 @@ function closeQrDialog() {
 async function checkSession() {
   try {
     const response = await fetch('/api/session');
-    const data = await response.json();
+    const data = await readApiJson(response);
     if (response.ok && data.authenticated) {
       hideLoginGate();
       return;
@@ -276,6 +276,24 @@ async function checkSession() {
     // ignore, keep login visible
   }
   showLoginGate();
+}
+
+async function readApiJson(response) {
+  const contentType = response.headers.get('content-type') || '';
+  const responseText = await response.text();
+
+  if (!contentType.includes('application/json')) {
+    if (/^\s*</.test(responseText)) {
+      throw new Error('接口返回了网页内容，/api 路由没有命中 Worker。请重新部署 Workers，并确认 wrangler.toml 的 assets.run_worker_first 包含 /api/*。');
+    }
+    throw new Error(responseText || `接口返回格式错误：HTTP ${response.status}`);
+  }
+
+  try {
+    return JSON.parse(responseText);
+  } catch {
+    throw new Error('接口返回的 JSON 格式不正确');
+  }
 }
 
 function hideLoginGate() {

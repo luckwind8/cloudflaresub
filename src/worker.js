@@ -66,6 +66,20 @@ function getAdminPassword(env) {
   return String(env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD);
 }
 
+function hasKvStore(env) {
+  return Boolean(env?.SUB_STORE?.get && env?.SUB_STORE?.put);
+}
+
+function missingKvResponse() {
+  return json(
+    {
+      ok: false,
+      error: '未绑定 SUB_STORE KV，请先创建 KV 命名空间并在 wrangler.toml 或 Cloudflare 后台绑定 SUB_STORE。',
+    },
+    500,
+  );
+}
+
 function getCookie(request, name) {
   const cookieHeader = request.headers.get('cookie') || '';
   const cookies = cookieHeader.split(';').map((item) => item.trim());
@@ -92,14 +106,14 @@ async function isLoggedIn(request, env) {
   }
 
   const sessionId = getCookie(request, AUTH_COOKIE_NAME);
-  if (!sessionId || !env.SUB_STORE) return false;
+  if (!sessionId || !hasKvStore(env)) return false;
   const sessionHash = await sha256Hex(sessionId);
   const stored = await env.SUB_STORE.get(`session:${sessionHash}`);
   return Boolean(stored);
 }
 
 async function buildAuthCookie(env, url) {
-  if (!env.SUB_STORE) {
+  if (!hasKvStore(env)) {
     throw new Error('未配置 SUB_STORE，无法创建登录会话');
   }
   const value = createShortId(32);
@@ -123,6 +137,10 @@ async function deleteAuthSession(request, env) {
 }
 
 async function handleLogin(request, env, url) {
+  if (!hasKvStore(env)) {
+    return missingKvResponse();
+  }
+
   let body;
   try {
     body = await request.json();
@@ -508,6 +526,10 @@ async function buildDedupHash(body, normalizedOptions = {}) {
 }
 
 async function handleGenerate(request, env, url) {
+  if (!hasKvStore(env)) {
+    return missingKvResponse();
+  }
+
   let body;
   try {
     body = await request.json();
@@ -617,6 +639,10 @@ function validateAccessToken(url, env) {
 }
 
 async function handleSub(url, env) {
+  if (!hasKvStore(env)) {
+    return text('Server config error: missing SUB_STORE KV binding', 500);
+  }
+
   const tokenCheck = validateAccessToken(url, env);
   if (!tokenCheck.ok) return tokenCheck.response;
 

@@ -120,6 +120,24 @@ npm run deploy
 -   客户端导入名称会写入订阅响应标题，也会用于生成节点名称。
 -   优选 IP 列表默认已预填，可以直接删除、追加或替换。
 
+## 7. 常见问题
+
+如果登录时报错 `Unexpected token '<', "<!DOCTYPE"... is not valid JSON`，说明 `/api/login` 返回了网页内容，没有命中 Worker 接口。请检查：
+
+-   是否使用 `npm run deploy` 或 `npx wrangler deploy` 部署 Workers 项目，而不是只上传 `public` 静态文件。
+-   `wrangler.toml` 是否包含：
+
+```toml
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/sub/*"]
+```
+
+-   是否已经创建 KV，并把 `SUB_STORE` 绑定到当前 Worker。
+-   部署后访问 `https://你的域名/api/session`，正常应返回 JSON，例如 `{"ok":true,"authenticated":false}`。
+
 视频教程：
 https://youtu.be/E5PI0LsQ43M
 ------------------------------------------------------------------------
